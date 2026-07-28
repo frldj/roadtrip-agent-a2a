@@ -1,8 +1,6 @@
 """Tests for A2A agent discovery and schema parsing."""
-import json
 
 import httpx
-import pytest
 import respx
 
 from orchestrator.discovery import (
