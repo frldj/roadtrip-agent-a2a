@@ -22,15 +22,22 @@ def build_agent_card() -> AgentCard:
         id="find_accommodation",
         name="Trouver des hébergements pour un roadtrip",
         description=(
-            "Pour chaque étape journalière d'un itinéraire, cherche des hôtels "
-            "et/ou campings à proximité via OpenStreetMap (Overpass API). "
-            "Gratuit, sans clé API."
+            "Find hotels or campsites at each overnight stop along the route "
+            "using OpenStreetMap (free, no API key required). "
+            "Call after plan_route."
+            "\n---\n"
+            '{"type":"object","required":[],'
+            '"properties":{'
+            '"accommodation_type":{"type":"string",'
+            '"enum":["hotel","camping","no_preference"],'
+            '"description":"Preferred accommodation type (default: no_preference)"},'
+            '"budget_per_night_eur":{"type":"number",'
+            '"description":"Maximum budget per night in euros (optional)"}'
+            "}}"
         ),
-        tags=["roadtrip", "hébergement", "hôtel", "camping", "osm"],
+        tags=["roadtrip", "accommodation", "hotel", "camping", "osm"],
         examples=[
-            '{"segments": [{"day_index": 1, "start_location": "Paris", '
-            '"end_location": "Lyon", "distance_km": 465, "duration_minutes": 262}], '
-            '"accommodation_type": "no_preference"}'
+            '{"accommodation_type": "camping", "budget_per_night_eur": 30}'
         ],
         input_modes=["text"],
         output_modes=["text"],

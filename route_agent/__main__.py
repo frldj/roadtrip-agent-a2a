@@ -22,14 +22,25 @@ def build_agent_card() -> AgentCard:
         id="plan_route",
         name="Planifier un itinéraire de roadtrip",
         description=(
-            "Calcule un itinéraire routier entre une origine, une destination "
-            "et des étapes optionnelles, puis le découpe en segments "
-            "journaliers selon un nombre d'heures de conduite maximal."
+            "Compute a multi-day road-trip itinerary between origin and destination "
+            "using real routing data (OSRM). Always call this first — the other agents "
+            "need its route segments."
+            "\n---\n"
+            '{"type":"object","required":["origin","destination"],'
+            '"properties":{'
+            '"origin":{"type":"string","description":"Departure city or address"},'
+            '"destination":{"type":"string","description":"Arrival city or address"},'
+            '"waypoints":{"type":"array","items":{"type":"string"},'
+            '"description":"Optional intermediate stops"},'
+            '"max_driving_hours_per_day":{"type":"number",'
+            '"description":"Max driving hours per day (default 6)"},'
+            '"start_date":{"type":"string",'
+            '"description":"Trip start date ISO e.g. 2026-08-10 (optional)"}'
+            "}}"
         ),
-        tags=["roadtrip", "itinéraire", "route", "navigation"],
+        tags=["roadtrip", "routing", "osrm", "itinerary"],
         examples=[
-            '{"origin": "Paris", "destination": "Barcelone", '
-            '"max_driving_hours_per_day": 6}'
+            '{"origin": "Paris", "destination": "Barcelona", "max_driving_hours_per_day": 6}'
         ],
         input_modes=["text"],
         output_modes=["text"],

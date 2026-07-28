@@ -22,15 +22,26 @@ def build_agent_card() -> AgentCard:
         id="plan_charging",
         name="Planifier les arrêts recharge / carburant",
         description=(
-            "Calcule les arrêts de recharge nécessaires pour un véhicule "
-            "électrique le long d'un itinéraire segmenté, selon l'autonomie, "
-            "la consommation et les seuils de charge. Pour un véhicule "
-            "thermique, confirme la faisabilité sans arrêt imposé."
+            "Find charging stops (electric vehicle) or fuel stations (thermal) "
+            "along the route. Call after plan_route. Works for both vehicle types. "
+            "Also corrects energy consumption for elevation using SRTM data."
+            "\n---\n"
+            '{"type":"object","required":["vehicle_type"],'
+            '"properties":{'
+            '"vehicle_type":{"type":"string","enum":["electric","thermal"],'
+            '"description":"Vehicle propulsion type"},'
+            '"battery_capacity_kwh":{"type":"number",'
+            '"description":"Battery capacity in kWh (electric only)"},'
+            '"consumption_kwh_per_100km":{"type":"number",'
+            '"description":"Energy consumption in kWh/100km (electric only)"},'
+            '"tesla_supercharger_only":{"type":"boolean",'
+            '"description":"Restrict to Tesla Superchargers only (default false)"}'
+            "}}"
         ),
-        tags=["roadtrip", "recharge", "électrique", "autonomie", "borne"],
+        tags=["roadtrip", "charging", "electric", "range", "ev"],
         examples=[
             '{"vehicle_type": "electric", "battery_capacity_kwh": 60, '
-            '"consumption_kwh_per_100km": 17, "segments": [...]}'
+            '"consumption_kwh_per_100km": 17, "tesla_supercharger_only": false}'
         ],
         input_modes=["text"],
         output_modes=["text"],

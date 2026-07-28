@@ -22,14 +22,15 @@ in the terminal, and a **web UI** with an interactive map.
 
 ## Features
 
-- **Routing**: Nominatim/OSM geocoding, OSRM route calculation, day-by-day split
+- **Routing**: Nominatim/OSM geocoding, OSRM route calculation, day-by-day split; full road geometry stored per segment for accurate rendering
 - **EV charging**: battery discharge simulation, real charging stops via Overpass/OSM or Open Charge Map (optional key), Tesla Supercharger filter
 - **Elevation**: consumption correction using a physics-based EV model (mass, motor efficiency, regenerative braking), SRTM 90 m data via OpenTopoData (free, no key)
 - **Accommodation**: hotels and campsites via Google Places (optional key) or Overpass/OSM, with price range estimates
 - **Streaming**: real-time progress via A2A `TaskStatusUpdateEvent` during long computations
 - **In-memory cache**: OSRM routes, Overpass stops, OCM stops and elevation cached to avoid redundant API calls
+- **Orchestrator robustness**: code-level deduplication guard prevents the LLM from calling the same agent twice regardless of model behaviour
 - **LLM chat**: Ollama-powered conversational interface (local model) that collects trip parameters and triggers planning
-- **Web UI**: interactive Leaflet/OSM map with clickable cards for charging stops and accommodation
+- **Web UI**: interactive Leaflet/OSM map — Google Maps-style double polyline following real road geometry, charging stops positioned along the actual route, clickable cards with direct links
 
 ## Architecture
 
@@ -306,7 +307,7 @@ roadtrip-a2a/
 │   └── grafana/
 │       ├── provisioning/   # auto-provisioned datasource + dashboard
 │       └── dashboards/roadtrip_a2a.json  # pre-wired dashboard
-├── tests/                  # 76 tests (pytest, respx, asyncio)
+├── tests/                  # 93 tests (pytest, respx, asyncio)
 ├── docker-compose.monitoring.yml  # Prometheus :9090 + Grafana :3000
 └── docs/
     └── screenshot.png      # web UI screenshot
@@ -351,6 +352,8 @@ The FastAPI server (`web_server/__main__.py`) exposes a `/ws/chat` WebSocket tha
 3. Hides the marker and JSON from the chat bubble
 4. Calls `plan_roadtrip()` directly and sends the structured plan
 5. Displays stops and accommodation on the Leaflet map
+
+**Map rendering** — each route segment is drawn as a double polyline (white 9 px shadow + blue 5 px main line with round caps/joins) following the actual road geometry returned by OSRM and stored in `RouteSegment.path_hint`. Charging stop markers are positioned by walking the real polyline at the exact `distance_from_day_start_km` fraction via `pointAlongPolyline()`, so they land on the road rather than on the straight line between segment endpoints.
 
 Clickable cards include Google Maps links for each stop/accommodation,
 Tesla.com links for Superchargers, and CampingFrance/Booking.com links for accommodation.
@@ -407,9 +410,10 @@ graph LR
 | `AccommodationRequest` | `AccommodationPlanResponse` | Accommodation Agent |
 | `RoadtripRequest` | `RoadtripPlan` | Orchestrator |
 
-`RouteSegment` embeds geocoded coordinates (`start_lat/lon`, `end_lat/lon`),
-avoiding re-geocoding in downstream agents and enabling interpolation of
-charging stop positions along the route.
+`RouteSegment` embeds geocoded coordinates (`start_lat/lon`, `end_lat/lon`) and the
+full road geometry as a JSON-encoded `[[lat, lon], …]` list in `path_hint` (populated
+from OSRM step-level GeoJSON). Downstream agents avoid re-geocoding; the frontend uses
+`path_hint` to draw real road polylines and position charging stop markers precisely.
 
 ## Tests
 
@@ -418,9 +422,9 @@ pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
-76 tests across 7 modules: schema validation, EV physics model, Haversine distance,
+93 tests across 8 modules: schema validation, EV physics model, Haversine distance,
 Nominatim geocoding (HTTP-mocked), LLM plan extraction (including fallback), A2A
-message helpers, and Prometheus metrics.
+message helpers, Prometheus metrics, and orchestrator deduplication guard.
 
 ## Roadmap
 

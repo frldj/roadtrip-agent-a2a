@@ -342,6 +342,34 @@ function labelIcon(text, bg, color = 'white') {
   });
 }
 
+// ── Interpolation le long d'une polyligne ─────────────────────────────────────
+// Retourne [lat, lon] au pourcentage `fraction` (0–1) du chemin total.
+function pointAlongPolyline(latlons, fraction) {
+  if (!latlons || latlons.length < 2) return latlons?.[0] ?? [0, 0];
+
+  // Distances cumulées entre chaque paire de points successifs (degrés ≈ km pour la précision requise)
+  let total = 0;
+  const segs = [];
+  for (let i = 1; i < latlons.length; i++) {
+    const dlat = latlons[i][0] - latlons[i-1][0];
+    const dlon = latlons[i][1] - latlons[i-1][1];
+    const d = Math.sqrt(dlat*dlat + dlon*dlon);
+    segs.push(d);
+    total += d;
+  }
+
+  let target = fraction * total;
+  for (let i = 0; i < segs.length; i++) {
+    if (target <= segs[i]) {
+      const t = segs[i] > 0 ? target / segs[i] : 0;
+      const a = latlons[i], b = latlons[i+1];
+      return [a[0] + t*(b[0]-a[0]), a[1] + t*(b[1]-a[1])];
+    }
+    target -= segs[i];
+  }
+  return latlons[latlons.length - 1];
+}
+
 // ── Affichage du plan sur la carte ───────────────────────────────────────────
 function displayPlan(plan) {
   clearMap();
@@ -360,8 +388,16 @@ function displayPlan(plan) {
     const e = [seg.end_lat, seg.end_lon];
     bounds.push(s, e);
 
-    L.polyline([s, e], { color: '#2563eb', weight: 4, opacity: .75 })
-      .bindPopup(`<b>Jour ${seg.day_index + 1}</b><br>${seg.start_location} → ${seg.end_location}<br>${seg.distance_km.toFixed(0)} km · ${(seg.duration_minutes / 60).toFixed(1)} h`)
+    // Géométrie routière réelle si disponible, sinon ligne droite de secours
+    const latlons = seg.path_hint ? JSON.parse(seg.path_hint) : [s, e];
+
+    const popupContent = `<b>Jour ${seg.day_index}</b><br>${seg.start_location} → ${seg.end_location}<br>${seg.distance_km.toFixed(0)} km · ${(seg.duration_minutes / 60).toFixed(1)} h`;
+
+    // Style Google Maps : trait blanc épais en dessous + trait bleu par-dessus
+    L.polyline(latlons, { color: 'white', weight: 9, opacity: 0.85, lineCap: 'round', lineJoin: 'round' })
+      .addTo(routeGroup);
+    L.polyline(latlons, { color: '#1a73e8', weight: 5, opacity: 0.95, lineCap: 'round', lineJoin: 'round' })
+      .bindPopup(popupContent)
       .addTo(routeGroup);
 
     // Marqueur début (uniquement pour la 1ère journée)
@@ -373,8 +409,8 @@ function displayPlan(plan) {
 
     // Marqueur fin de journée
     const isLast = i === segments.length - 1;
-    L.marker(e, { icon: iconDiv(isLast ? '🏁' : `J${seg.day_index + 1}`, isLast ? '#16a34a' : '#1e293b', 30) })
-      .bindPopup(`<b>${isLast ? 'Arrivée' : 'Étape J' + (seg.day_index + 1)}</b><br>${seg.end_location}`)
+    L.marker(e, { icon: iconDiv(isLast ? '🏁' : `J${seg.day_index}`, isLast ? '#16a34a' : '#1e293b', 30) })
+      .bindPopup(`<b>${isLast ? 'Arrivée' : 'Étape J' + seg.day_index}</b><br>${seg.end_location}`)
       .addTo(routeGroup);
   });
 
@@ -384,8 +420,10 @@ function displayPlan(plan) {
     if (!seg?.start_lat || !seg?.end_lat) return;
 
     const frac = Math.min(0.95, Math.max(0.05, stop.distance_from_day_start_km / (seg.distance_km || 1)));
-    const lat = seg.start_lat + frac * (seg.end_lat - seg.start_lat);
-    const lon = seg.start_lon + frac * (seg.end_lon - seg.start_lon);
+    const [lat, lon] = seg.path_hint
+      ? pointAlongPolyline(JSON.parse(seg.path_hint), frac)
+      : [seg.start_lat + frac * (seg.end_lat - seg.start_lat),
+         seg.start_lon + frac * (seg.end_lon - seg.start_lon)];
 
     const isTesla = (stop.station_provider_hint || '').toLowerCase().includes('tesla');
     const mapsQ = encodeURIComponent((isTesla ? 'Tesla Supercharger ' : 'borne de recharge ') + stop.location_hint);
@@ -466,7 +504,7 @@ function buildChargingCards(stops, segments, vehicleType) {
     card.innerHTML = `
       <div class="card-row1">
         <span class="badge ${isTesla ? 'badge-tesla' : 'badge-charge'}">${stop.station_provider_hint || 'Recharge'}</span>
-        <span style="color:#64748b;font-size:12px">J${stop.day_index + 1}</span>
+        <span style="color:#64748b;font-size:12px">J${stop.day_index}</span>
       </div>
       <div class="card-name">${stop.location_hint}</div>
       <div class="card-meta">${stop.charge_from_percent.toFixed(0)} % → ${stop.charge_to_percent.toFixed(0)} % · ~${stop.estimated_charging_minutes.toFixed(0)} min</div>
@@ -509,7 +547,7 @@ function buildAccommodationCards(options, segments) {
     card.innerHTML = `
       <div class="card-row1">
         <span class="badge ${isCamping ? 'badge-camping' : 'badge-hotel'}">${isCamping ? 'Camping' : 'Hôtel'}</span>
-        <span style="color:#64748b;font-size:12px">J${opt.day_index + 1}</span>
+        <span style="color:#64748b;font-size:12px">J${opt.day_index}</span>
         ${opt.rating ? `<span style="color:#d97706;font-size:12px">⭐ ${opt.rating}</span>` : ''}
       </div>
       <div class="card-name">${opt.name}</div>
