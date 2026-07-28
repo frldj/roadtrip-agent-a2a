@@ -1,8 +1,6 @@
 """Tests de la logique de validation du plan de roadtrip."""
 from __future__ import annotations
 
-import pytest
-
 from common.schemas import PlanValidationRequest, RouteSegment
 from validator_agent.core import validate_plan
 

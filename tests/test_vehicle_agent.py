@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 for _mod_name in ("a2a", "a2a.client", "a2a.types", "a2a.utils"):
     sys.modules.setdefault(_mod_name, MagicMock())
 
-import math
 import pytest
 
 from common.schemas import ChargingRequest, RouteSegment, VehicleType
