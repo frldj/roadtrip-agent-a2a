@@ -74,3 +74,59 @@ async def test_geocode_returns_float_tuple():
         lat, lon = await geocode("Marseille")
     assert isinstance(lat, float)
     assert isinstance(lon, float)
+
+
+# ── Bypass "lat,lon" (utilisé par vehicle_agent → route_agent) ───────────────
+
+class TestLatLonBypass:
+    @pytest.mark.asyncio
+    async def test_latlon_string_returns_directly(self):
+        # Aucune requête HTTP ne doit être émise
+        with respx.mock:
+            lat, lon = await geocode("46.5000,2.3000")
+        assert lat == pytest.approx(46.5)
+        assert lon == pytest.approx(2.3)
+
+    @pytest.mark.asyncio
+    async def test_latlon_negative_longitude(self):
+        lat, lon = await geocode("43.2965,-1.9800")
+        assert lat == pytest.approx(43.2965)
+        assert lon == pytest.approx(-1.98)
+
+    @pytest.mark.asyncio
+    async def test_latlon_bypass_is_cached(self):
+        _cache.clear()
+        await geocode("48.8566,2.3522")
+        assert "48.8566,2.3522" in _cache
+
+    @pytest.mark.asyncio
+    async def test_latlon_does_not_call_nominatim(self):
+        with respx.mock as mock:
+            mock.get(_NOMINATIM_URL).mock(side_effect=AssertionError("Nominatim should not be called"))
+            lat, lon = await geocode("45.7640,4.8357")
+        assert lat == pytest.approx(45.764)
+        assert lon == pytest.approx(4.8357)
+
+    @pytest.mark.asyncio
+    async def test_latlon_with_spaces_around_comma(self):
+        lat, lon = await geocode("46.5 , 2.3")
+        assert lat == pytest.approx(46.5)
+        assert lon == pytest.approx(2.3)
+
+    @pytest.mark.asyncio
+    async def test_place_name_with_comma_falls_through_to_nominatim(self):
+        # "Paris, France" contient une virgule mais ne parse pas en deux floats
+        with respx.mock:
+            respx.get(_NOMINATIM_URL).mock(
+                return_value=httpx.Response(
+                    200, json=[{"lat": "48.8566", "lon": "2.3522"}]
+                )
+            )
+            lat, lon = await geocode("Paris, France")
+        assert lat == pytest.approx(48.8566)
+
+    @pytest.mark.asyncio
+    async def test_latlon_five_decimal_places(self):
+        lat, lon = await geocode("46.12345,2.67890")
+        assert lat == pytest.approx(46.12345)
+        assert lon == pytest.approx(2.6789)

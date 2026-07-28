@@ -26,6 +26,8 @@ from common.schemas import (
     AccommodationType,
     ChargingPlanResponse,
     ChargingRequest,
+    PlanValidationRequest,
+    PlanValidationResponse,
     RoadtripPlan,
     RoadtripRequest,
     RoutePlanRequest,
@@ -34,9 +36,12 @@ from common.schemas import (
 from orchestrator.discovery import DiscoveredAgent, agent_to_tool, discover_agents
 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5")
+VALIDATOR_AGENT_URL = os.getenv("VALIDATOR_AGENT_URL", "http://localhost:9004")
 
 # Registry: all agent URLs the orchestrator should probe at startup.
 # Add new agents here (or override via env) — no other code changes needed.
+# Le validator_agent est exclu de la discovery LLM : l'orchestrateur l'appelle
+# directement après l'assemblage du plan (appel A2A programmatique, pas LLM-driven).
 AGENT_REGISTRY_URLS: list[str] = [
     os.getenv("ROUTE_AGENT_URL", "http://localhost:9001"),
     os.getenv("VEHICLE_AGENT_URL", "http://localhost:9002"),
@@ -295,7 +300,52 @@ async def plan_roadtrip(
         if route is None:
             raise RuntimeError("LLM orchestrator did not call plan_route")
 
-        return RoadtripPlan(route=route, charging=charging, accommodation=accommodation)
+        # ── 3. Appliquer la correction de tracé si vehicle_agent l'a demandée ─
+        # Quand aucune borne n'est trouvée sur un segment, le vehicle_agent appelle
+        # le route_agent (A2A peer-to-peer) et retourne des sous-segments alternatifs.
+        # L'orchestrateur applique cette correction sur la route finale.
+        if charging and charging.route_correction:
+            corrected_indices = {s.day_index for s in charging.route_correction}
+            kept = [s for s in route.segments if s.day_index not in corrected_indices]
+            merged = sorted(kept + charging.route_correction, key=lambda s: s.day_index)
+            route = RoutePlanResponse(
+                segments=merged,
+                total_distance_km=sum(s.distance_km for s in merged),
+                total_duration_minutes=sum(s.duration_minutes for s in merged),
+            )
+            await _progress("Tracé corrigé par vehicle_agent → route_agent.")
+
+        # ── 4. Validation du plan (appel A2A direct, hors boucle LLM) ────────
+        # Le validator_agent vérifie la cohérence du plan assemblé : durée de
+        # conduite, faisabilité recharge, couverture hébergement.
+        validation: PlanValidationResponse | None = None
+        try:
+            days_with_accom = [o.day_index for o in (accommodation.options if accommodation else [])]
+            overnight_days = [s.day_index for s in route.segments[:-1]]
+            val_payload = PlanValidationRequest(
+                segments=route.segments,
+                max_driving_hours_per_day=req.max_driving_hours_per_day,
+                charging_feasible=charging.feasible if charging else True,
+                charging_warnings=charging.warnings if charging else [],
+                days_with_accommodation=days_with_accom,
+                days_needing_accommodation=overnight_days,
+            ).model_dump()
+            raw_val = await call_agent(VALIDATOR_AGENT_URL, val_payload)
+            if "error" not in raw_val:
+                validation = PlanValidationResponse.model_validate(raw_val)
+                if not validation.valid:
+                    await _progress(
+                        f"Validation : {len(validation.issues)} problème(s) détecté(s)."
+                    )
+        except Exception:
+            pass  # validator indisponible — le plan reste valide sans validation
+
+        return RoadtripPlan(
+            route=route,
+            charging=charging,
+            accommodation=accommodation,
+            validation=validation,
+        )
 
     except Exception:
         plan_status = "error"

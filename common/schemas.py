@@ -56,6 +56,8 @@ class RoutePlanResponse(BaseModel):
     segments: list[RouteSegment]
     total_distance_km: float
     total_duration_minutes: float
+    llm_stopovers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ChargingRequest(BaseModel):
@@ -70,6 +72,8 @@ class ChargingRequest(BaseModel):
     min_arrival_charge_percent: float = 15.0
     max_charge_stop_percent: float = 80.0  # charge rapide -> viser 80% typiquement
     tesla_supercharger_only: bool = False
+    overnight_charging: bool = True  # recharger à chaque étape intermédiaire (nuit à l'hôtel, Camp Mode...)
+    overnight_charge_to_percent: float = 90.0  # niveau cible pour la recharge de nuit
 
 
 class ChargingStop(BaseModel):
@@ -80,6 +84,7 @@ class ChargingStop(BaseModel):
     charge_to_percent: float
     estimated_charging_minutes: float
     station_provider_hint: Optional[str] = None  # ex: "Ionity", "Tesla Supercharger"
+    is_overnight: bool = False  # True = recharge de nuit à l'étape, pas en route
 
 
 class ChargingPlanResponse(BaseModel):
@@ -87,6 +92,9 @@ class ChargingPlanResponse(BaseModel):
     fuel_or_charge_stops: list[ChargingStop]
     feasible: bool
     warnings: list[str] = Field(default_factory=list)
+    # Présent quand vehicle_agent a détecté un segment infaisable et a appelé
+    # route_agent pour obtenir un découpage alternatif.
+    route_correction: Optional[list["RouteSegment"]] = None
 
 
 class AccommodationRequest(BaseModel):
@@ -108,6 +116,27 @@ class AccommodationOption(BaseModel):
 
 class AccommodationPlanResponse(BaseModel):
     options: list[AccommodationOption]
+
+
+class ValidationIssue(BaseModel):
+    severity: str  # "error" | "warning" | "info"
+    code: str
+    message: str
+    day_index: Optional[int] = None
+
+
+class PlanValidationRequest(BaseModel):
+    segments: list[RouteSegment]
+    max_driving_hours_per_day: float = 6.0
+    charging_feasible: bool = True
+    charging_warnings: list[str] = Field(default_factory=list)
+    days_with_accommodation: list[int] = Field(default_factory=list)
+    days_needing_accommodation: list[int] = Field(default_factory=list)
+
+
+class PlanValidationResponse(BaseModel):
+    valid: bool
+    issues: list[ValidationIssue] = Field(default_factory=list)
 
 
 class RoadtripRequest(BaseModel):
@@ -132,3 +161,4 @@ class RoadtripPlan(BaseModel):
     route: RoutePlanResponse
     charging: Optional[ChargingPlanResponse] = None
     accommodation: Optional[AccommodationPlanResponse] = None
+    validation: Optional[PlanValidationResponse] = None
