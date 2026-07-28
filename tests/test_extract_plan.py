@@ -4,8 +4,6 @@ Couvre les deux chemins :
   - avec marqueur PLAN_READY: (format attendu)
   - sans marqueur (fallback bloc ```json```)
 """
-import pytest
-
 from web_server.__main__ import _extract_plan
 
 _FULL_JSON = """{

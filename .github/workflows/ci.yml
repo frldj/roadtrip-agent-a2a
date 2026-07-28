@@ -58,7 +58,6 @@ jobs:
             --cov=. \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
-            --cov-omit="tests/*,*/__main__.py,*/server.py" \
             -v
 
       - name: Upload coverage report

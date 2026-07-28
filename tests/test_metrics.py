@@ -1,5 +1,4 @@
 """Tests d'enregistrement et d'utilisation des métriques Prometheus."""
-import pytest
 from prometheus_client import Counter, Gauge, Histogram
 
 from monitoring.metrics import (
