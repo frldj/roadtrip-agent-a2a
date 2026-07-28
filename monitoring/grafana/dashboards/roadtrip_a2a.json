@@ -1,0 +1,212 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "title": "Roadtrip A2A — LLM & Agent Performance",
+  "uid": "roadtrip-a2a-v1",
+  "schemaVersion": 38,
+  "version": 1,
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      }
+    ]
+  },
+  "panels": [
+
+    { "id": 1, "type": "row", "title": "Vue d'ensemble", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+
+    {
+      "id": 2, "type": "stat", "title": "Requêtes LLM / min",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "targets": [{
+        "expr": "round(rate(roadtrip_llm_requests_total[5m]) * 60, 0.01)",
+        "legendFormat": "req/min"
+      }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area", "orientation": "auto" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }, "unit": "reqpm" } }
+    },
+
+    {
+      "id": 3, "type": "stat", "title": "Connexions WebSocket actives",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "targets": [{ "expr": "roadtrip_websocket_connections_active", "legendFormat": "connexions" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 20 }] } } }
+    },
+
+    {
+      "id": 4, "type": "stat", "title": "Plans générés (succès)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "targets": [{ "expr": "increase(roadtrip_plan_extractions_total{status='success'}[1h])", "legendFormat": "plans/h" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } } }
+    },
+
+    {
+      "id": 5, "type": "stat", "title": "Taux de succès planification",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "targets": [{
+        "expr": "100 * rate(roadtrip_planning_requests_total{status='success'}[10m]) / (rate(roadtrip_planning_requests_total[10m]) > 0)",
+        "legendFormat": "%"
+      }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "unit": "percent", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 80 }, { "color": "green", "value": 95 }] } } }
+    },
+
+    { "id": 10, "type": "row", "title": "Performance LLM", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 } },
+
+    {
+      "id": 11, "type": "timeseries", "title": "Durée réponse LLM (secondes)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le, model) (rate(roadtrip_llm_request_duration_seconds_bucket[5m])))", "legendFormat": "p50 — {{model}}" },
+        { "expr": "histogram_quantile(0.95, sum by (le, model) (rate(roadtrip_llm_request_duration_seconds_bucket[5m])))", "legendFormat": "p95 — {{model}}" },
+        { "expr": "histogram_quantile(0.99, sum by (le, model) (rate(roadtrip_llm_request_duration_seconds_bucket[5m])))", "legendFormat": "p99 — {{model}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi", "sort": "none" } },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 5 } } }
+    },
+
+    {
+      "id": 12, "type": "timeseries", "title": "Temps au premier token (TTFT)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le, model) (rate(roadtrip_llm_time_to_first_token_seconds_bucket[5m])))", "legendFormat": "p50 — {{model}}" },
+        { "expr": "histogram_quantile(0.95, sum by (le, model) (rate(roadtrip_llm_time_to_first_token_seconds_bucket[5m])))", "legendFormat": "p95 — {{model}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi", "sort": "none" } },
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2, "fillOpacity": 10 } } }
+    },
+
+    {
+      "id": 13, "type": "timeseries", "title": "Vitesse de génération (tokens/s)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le, model) (rate(roadtrip_llm_tokens_per_second_bucket[5m])))", "legendFormat": "p50 tok/s — {{model}}" },
+        { "expr": "histogram_quantile(0.95, sum by (le, model) (rate(roadtrip_llm_tokens_per_second_bucket[5m])))", "legendFormat": "p95 tok/s — {{model}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 15 } } }
+    },
+
+    {
+      "id": 14, "type": "timeseries", "title": "Tokens générés par seconde",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        { "expr": "rate(roadtrip_llm_tokens_generated_total[1m])", "legendFormat": "tokens/s — {{model}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 20 } } }
+    },
+
+    { "id": 20, "type": "row", "title": "Planification & Agents A2A", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 } },
+
+    {
+      "id": 21, "type": "timeseries", "title": "Durée totale de planification",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le, status) (rate(roadtrip_planning_duration_seconds_bucket[5m])))", "legendFormat": "p50 — {{status}}" },
+        { "expr": "histogram_quantile(0.95, sum by (le, status) (rate(roadtrip_planning_duration_seconds_bucket[5m])))", "legendFormat": "p95 — {{status}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 5 } } }
+    },
+
+    {
+      "id": 22, "type": "timeseries", "title": "Durée des appels agents A2A",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le, agent) (rate(roadtrip_agent_call_duration_seconds_bucket[5m])))", "legendFormat": "p50 — {{agent}}" },
+        { "expr": "histogram_quantile(0.95, sum by (le, agent) (rate(roadtrip_agent_call_duration_seconds_bucket[5m])))", "legendFormat": "p95 — {{agent}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } } }
+    },
+
+    {
+      "id": 23, "type": "timeseries", "title": "Taux d'appels agents (req/s)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+      "targets": [
+        { "expr": "rate(roadtrip_agent_calls_total[2m])", "legendFormat": "{{agent}} — {{status}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2 } } }
+    },
+
+    {
+      "id": 24, "type": "timeseries", "title": "Tours de conversation LLM",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+      "targets": [
+        { "expr": "rate(roadtrip_llm_conversation_turns_total[5m])", "legendFormat": "tours/s — {{model}}" },
+        { "expr": "increase(roadtrip_llm_conversation_turns_total[1h])", "legendFormat": "total/h — {{model}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 10 } } }
+    },
+
+    { "id": 30, "type": "row", "title": "WebSocket & Messages", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 } },
+
+    {
+      "id": 31, "type": "timeseries", "title": "Connexions WebSocket",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 40 },
+      "targets": [
+        { "expr": "roadtrip_websocket_connections_active", "legendFormat": "actives" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 25 }, "color": { "fixedColor": "blue", "mode": "fixed" } } }
+    },
+
+    {
+      "id": 32, "type": "timeseries", "title": "Messages WebSocket (flux)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 40 },
+      "targets": [
+        { "expr": "rate(roadtrip_websocket_messages_total[1m])", "legendFormat": "{{direction}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2 } } }
+    },
+
+    {
+      "id": 33, "type": "timeseries", "title": "Erreurs LLM",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 40 },
+      "targets": [
+        { "expr": "rate(roadtrip_llm_requests_total{status='error'}[5m])", "legendFormat": "erreurs LLM/s — {{model}}" },
+        { "expr": "rate(roadtrip_agent_calls_total{status='error'}[5m])", "legendFormat": "erreurs agent/s — {{agent}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "reqps", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2, "fillOpacity": 20 } } }
+    }
+
+  ]
+}
