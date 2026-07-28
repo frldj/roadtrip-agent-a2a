@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from chat_client.ollama_client import chat_stream, list_models
-from common.schemas import AccommodationType, RoadtripRequest, VehicleType
+from common.schemas import RoadtripRequest
 from orchestrator.__main__ import format_plan
 from orchestrator.core import plan_roadtrip
 
