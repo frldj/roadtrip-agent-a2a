@@ -13,17 +13,27 @@ limite les requêtes Overpass simultanées pour éviter le rate-limiting.
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 import os
 
 import httpx
 
+from common.a2a_client_utils import call_agent
 from common.elevation import consumption_factor, elevation_gain_loss
 from common.schemas import (
     ChargingPlanResponse,
     ChargingRequest,
     ChargingStop,
+    RoutePlanRequest,
+    RoutePlanResponse,
+    RouteSegment,
     VehicleType,
 )
+
+logger = logging.getLogger(__name__)
+
+ROUTE_AGENT_URL = os.getenv("ROUTE_AGENT_URL", "http://localhost:9001")
 
 DEFAULT_BATTERY_KWH = 60.0
 DEFAULT_CONSUMPTION_KWH_100KM = 17.0
@@ -39,17 +49,103 @@ OCM_URL = "https://api.openchargemap.io/v3/poi/"
 # Limite les requêtes Overpass simultanées pour éviter le rate-limiting
 _OVERPASS_SEM = asyncio.Semaphore(2)
 
-# Caches en mémoire pour les lookups de bornes
-_osm_cache: dict[tuple, dict | None] = {}
-_ocm_cache: dict[tuple, dict | None] = {}
+# Caches en mémoire pour les lookups de bornes (liste brute de résultats)
+_osm_cache: dict[tuple, list[dict]] = {}
+_ocm_cache: dict[tuple, list[dict]] = {}
+
+
+# ── Helpers directionnels ─────────────────────────────────────────────────────
+
+def _station_coords(el: dict) -> tuple[float, float] | None:
+    if "lat" in el and "lon" in el:
+        return el["lat"], el["lon"]
+    c = el.get("center")
+    return (c["lat"], c["lon"]) if c else None
+
+
+def _is_forward(
+    slat: float, slon: float,
+    clat: float, clon: float,
+    dlat: float, dlon: float,
+    max_backtrack_km: float = 40.0,
+) -> bool:
+    """
+    True si la borne (slat, slon) ne nécessite pas plus de max_backtrack_km
+    de détour en sens inverse vers la destination (dlat, dlon).
+
+    Utilise une projection en km avec correction cosinus latitude pour être
+    indépendant de la longueur du trajet (contrairement à un seuil relatif
+    qui autoriserait 160 km de détour sur Paris→San Sebastián).
+    """
+    cos_lat = math.cos(math.radians(clat))
+    dx_km = (dlat - clat) * 111.0
+    dy_km = (dlon - clon) * 111.0 * cos_lat
+    norm_km = math.sqrt(dx_km * dx_km + dy_km * dy_km)
+    if norm_km < 1e-6:
+        return True
+    sx_km = (slat - clat) * 111.0
+    sy_km = (slon - clon) * 111.0 * cos_lat
+    projection_km = (sx_km * dx_km + sy_km * dy_km) / norm_km
+    return projection_km >= -max_backtrack_km
+
+
+def _best_forward(
+    els: list[dict],
+    clat: float, clon: float,
+    dest_lat: float | None, dest_lon: float | None,
+) -> dict | None:
+    """Parmi une liste de bornes OSM, retourne la plus proche dans la bonne
+    direction. Si toutes sont en sens inverse, retourne la moins mauvaise."""
+    if not els:
+        return None
+
+    def _score(el: dict) -> tuple[int, float]:
+        coords = _station_coords(el)
+        if not coords:
+            return (2, 0.0)
+        slat, slon = coords
+        dist_sq = (slat - clat) ** 2 + (slon - clon) ** 2
+        if dest_lat is None or dest_lon is None:
+            return (0, dist_sq)
+        forward = _is_forward(slat, slon, clat, clon, dest_lat, dest_lon)
+        return (0 if forward else 1, dist_sq)
+
+    return min(els, key=_score)
+
+
+def _best_ocm_forward(
+    els: list[dict],
+    clat: float, clon: float,
+    dest_lat: float | None, dest_lon: float | None,
+) -> dict | None:
+    """Parmi une liste de bornes OCM, retourne la plus proche dans la bonne direction."""
+    if not els:
+        return None
+
+    def _score(el: dict) -> tuple[int, float]:
+        addr = el.get("AddressInfo") or {}
+        slat = addr.get("Latitude")
+        slon = addr.get("Longitude")
+        if slat is None or slon is None:
+            return (2, 0.0)
+        dist_sq = (slat - clat) ** 2 + (slon - clon) ** 2
+        if dest_lat is None or dest_lon is None:
+            return (0, dist_sq)
+        forward = _is_forward(slat, slon, clat, clon, dest_lat, dest_lon)
+        return (0 if forward else 1, dist_sq)
+
+    return min(els, key=_score)
 
 
 # ── Recherche OSM ─────────────────────────────────────────────────────────────
 
-async def _find_station_osm(lat: float, lon: float, tesla_only: bool = False) -> dict | None:
+async def _find_station_osm(
+    lat: float, lon: float, tesla_only: bool = False,
+    dest_lat: float | None = None, dest_lon: float | None = None,
+) -> dict | None:
     key = (round(lat, 3), round(lon, 3), tesla_only)
     if key in _osm_cache:
-        return _osm_cache[key]
+        return _best_forward(_osm_cache[key], lat, lon, dest_lat, dest_lon)
 
     if tesla_only:
         radius = 60_000
@@ -61,7 +157,7 @@ async def _find_station_osm(lat: float, lon: float, tesla_only: bool = False) ->
             f'node["amenity"="charging_station"]["operator"~"Tesla",i](around:{radius},{lat},{lon});'
             f'node["amenity"="charging_station"]["brand"~"Tesla",i](around:{radius},{lat},{lon});'
             f");"
-            f"out center 1;"
+            f"out center 10;"
         )
     else:
         radius = 30_000
@@ -69,10 +165,10 @@ async def _find_station_osm(lat: float, lon: float, tesla_only: bool = False) ->
             f"[out:json][timeout:20];"
             f'(node["amenity"="charging_station"](around:{radius},{lat},{lon});'
             f'way["amenity"="charging_station"](around:{radius},{lat},{lon}););'
-            f"out center 1;"
+            f"out center 10;"
         )
 
-    result: dict | None = None
+    els: list[dict] = []
     async with _OVERPASS_SEM:
         for mirror in _OVERPASS_MIRRORS:
             try:
@@ -80,13 +176,12 @@ async def _find_station_osm(lat: float, lon: float, tesla_only: bool = False) ->
                     resp = await client.post(mirror, data={"data": query})
                     if resp.status_code == 200:
                         els = resp.json().get("elements", [])
-                        result = els[0] if els else None
                         break
             except Exception:
                 continue
 
-    _osm_cache[key] = result
-    return result
+    _osm_cache[key] = els
+    return _best_forward(els, lat, lon, dest_lat, dest_lon)
 
 
 def _parse_kw(value: str) -> float | None:
@@ -146,34 +241,36 @@ def _osm_station_info(el: dict) -> tuple[str, str]:
 
 # ── Recherche OCM (optionnelle) ───────────────────────────────────────────────
 
-async def _find_station_ocm(lat: float, lon: float) -> dict | None:
+async def _find_station_ocm(
+    lat: float, lon: float,
+    dest_lat: float | None = None, dest_lon: float | None = None,
+) -> dict | None:
     api_key = os.getenv("OPEN_CHARGE_MAP_KEY", "").strip()
     if not api_key:
         return None
 
     key = (round(lat, 3), round(lon, 3))
     if key in _ocm_cache:
-        return _ocm_cache[key]
+        return _best_ocm_forward(_ocm_cache[key], lat, lon, dest_lat, dest_lon)
 
-    result: dict | None = None
+    els: list[dict] = []
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(OCM_URL, params={
                 "output": "json", "latitude": lat, "longitude": lon,
                 "distance": 40, "distanceunit": "KM",
-                "maxresults": 1, "key": api_key,
+                "maxresults": 10, "key": api_key,
                 "compact": "true", "verbose": "false",
                 "minpowerkw": 50,
                 "levelid": "3",
             })
             if resp.status_code == 200:
-                stations = resp.json()
-                result = stations[0] if stations else None
+                els = resp.json() or []
     except Exception:
         pass
 
-    _ocm_cache[key] = result
-    return result
+    _ocm_cache[key] = els
+    return _best_ocm_forward(els, lat, lon, dest_lat, dest_lon)
 
 
 def _ocm_station_info(station: dict) -> tuple[str, str]:
@@ -198,16 +295,55 @@ def _ocm_station_info(station: dict) -> tuple[str, str]:
 
 # ── Lookup parallèle ──────────────────────────────────────────────────────────
 
-async def _enrich_stop(lat: float, lon: float, tesla_only: bool) -> tuple[str, str]:
-    station_ocm = await _find_station_ocm(lat, lon) if not tesla_only else None
+async def _enrich_stop(
+    lat: float, lon: float, tesla_only: bool,
+    dest_lat: float | None = None, dest_lon: float | None = None,
+) -> tuple[str, str]:
+    station_ocm = await _find_station_ocm(lat, lon, dest_lat, dest_lon) if not tesla_only else None
     if station_ocm:
         return _ocm_station_info(station_ocm)
-    station_osm = await _find_station_osm(lat, lon, tesla_only=tesla_only)
+    station_osm = await _find_station_osm(lat, lon, tesla_only=tesla_only, dest_lat=dest_lat, dest_lon=dest_lon)
     if station_osm:
         return _osm_station_info(station_osm)
     if tesla_only:
         return "Tesla Supercharger (non localisé)", "Tesla Supercharger"
     return "", ""
+
+
+# ── Appel A2A peer-to-peer : vehicle_agent → route_agent ──────────────────────
+
+async def _split_via_route_agent(seg: RouteSegment) -> list[RouteSegment] | None:
+    """
+    Quand aucune borne n'est trouvée sur un segment, appelle le route_agent via
+    A2A pour obtenir un tracé alternatif passant par le point médian géographique.
+    Le point médian est transmis au format "lat,lon" — geocode() l'accepte directement.
+    Retourne les sous-segments si la correction réussit, None sinon.
+    """
+    if seg.start_lat is None or seg.end_lat is None:
+        return None
+
+    mid_lat = (seg.start_lat + seg.end_lat) / 2
+    mid_lon = (seg.start_lon + seg.end_lon) / 2
+    midpoint = f"{mid_lat:.5f},{mid_lon:.5f}"
+
+    try:
+        payload = RoutePlanRequest(
+            origin=seg.start_location,
+            destination=seg.end_location,
+            waypoints=[midpoint],
+            max_driving_hours_per_day=24.0,  # ne pas re-découper : on veut juste 2 legs
+        ).model_dump()
+        raw = await call_agent(ROUTE_AGENT_URL, payload)
+        if "error" in raw or not raw.get("segments"):
+            return None
+        sub = RoutePlanResponse.model_validate(raw).segments
+        if len(sub) < 2:
+            return None
+        # Renuméroter à partir du day_index du segment d'origine
+        return [s.model_copy(update={"day_index": seg.day_index + i}) for i, s in enumerate(sub)]
+    except Exception as exc:
+        logger.warning("route_agent split call failed for segment %s: %s", seg.day_index, exc)
+        return None
 
 
 # ── Logique principale ────────────────────────────────────────────────────────
@@ -299,6 +435,7 @@ async def plan_charging(req: ChargingRequest) -> ChargingPlanResponse:
 
             stop_params.append({
                 "day_index": seg.day_index,
+                "is_overnight": False,
                 "default_hint": f"~{round(segment_progress_km)} km après {seg.start_location}",
                 "distance_from_day_start_km": round(segment_progress_km, 1),
                 "charge_from_percent": round(charge_percent, 1),
@@ -309,6 +446,29 @@ async def plan_charging(req: ChargingRequest) -> ChargingPlanResponse:
                 "has_coords": has_coords,
             })
             charge_percent = charge_to
+
+        # ── Recharge de nuit à l'étape intermédiaire ──────────────────────────
+        # Pour les segments non-finaux, planifier un arrêt de recharge à la ville
+        # d'arrivée (nuit à l'hôtel, Tesla Camp Mode, camping-car…).
+        overnight_target = req.overnight_charge_to_percent
+        is_last_seg = seg.day_index == req.segments[-1].day_index
+        if req.overnight_charging and not is_last_seg and charge_percent < overnight_target:
+            delta_pct = overnight_target - charge_percent
+            est_min_night = round(delta_pct / 100.0 * 35.0 + 5.0, 0)
+            has_end_coords = seg.end_lat is not None and seg.end_lon is not None
+            stop_params.append({
+                "day_index": seg.day_index,
+                "is_overnight": True,
+                "default_hint": seg.end_location,
+                "distance_from_day_start_km": round(seg.distance_km, 1),
+                "charge_from_percent": round(charge_percent, 1),
+                "charge_to_percent": overnight_target,
+                "estimated_charging_minutes": est_min_night,
+                "lat": seg.end_lat if has_end_coords else 0.0,
+                "lon": seg.end_lon if has_end_coords else 0.0,
+                "has_coords": has_end_coords,
+            })
+            charge_percent = overnight_target
 
     if not stop_params:
         return ChargingPlanResponse(
@@ -322,10 +482,47 @@ async def plan_charging(req: ChargingRequest) -> ChargingPlanResponse:
     async def _no_coords() -> tuple[str, str]:
         return "", ""
 
+    seg_by_day = {seg.day_index: seg for seg in req.segments}
     enrichments = await asyncio.gather(*[
-        _enrich_stop(p["lat"], p["lon"], tesla_only) if p["has_coords"] else _no_coords()
+        _enrich_stop(
+            p["lat"], p["lon"], tesla_only,
+            # Stops overnight : on est déjà À destination, pas de filtre directionnel.
+            dest_lat=None if p.get("is_overnight") else seg_by_day[p["day_index"]].end_lat,
+            dest_lon=None if p.get("is_overnight") else seg_by_day[p["day_index"]].end_lon,
+        ) if p["has_coords"] else _no_coords()
         for p in stop_params
     ])
+
+    # ── Phase 2b : correction de tracé si aucune borne trouvée ───────────────
+    # Quand un arrêt nécessaire n'a aucune borne dans le rayon de recherche,
+    # le vehicle_agent appelle le route_agent (A2A peer-to-peer) pour obtenir
+    # un tracé alternatif passant par le point médian géographique du segment,
+    # ce qui augmente les chances de trouver des bornes sur un axe différent.
+    segments_needing_correction = {
+        p["day_index"]
+        for p, (loc, _prov) in zip(stop_params, enrichments)
+        if p["has_coords"] and not loc and not p.get("is_overnight")
+    }
+
+    route_correction: list[RouteSegment] | None = None
+    if segments_needing_correction:
+        seg_map = {seg.day_index: seg for seg in req.segments}
+        correction_tasks = [
+            _split_via_route_agent(seg_map[d])
+            for d in segments_needing_correction
+            if d in seg_map
+        ]
+        results = await asyncio.gather(*correction_tasks)
+        corrected: list[RouteSegment] = []
+        for sub in results:
+            if sub:
+                corrected.extend(sub)
+        if corrected:
+            route_correction = corrected
+            warnings.append(
+                f"Aucune borne trouvée sur {len(segments_needing_correction)} segment(s) — "
+                "le route_agent propose un tracé alternatif (route_correction)."
+            )
 
     # ── Phase 3 : assemblage ──────────────────────────────────────────────────
     stops = []
@@ -338,6 +535,7 @@ async def plan_charging(req: ChargingRequest) -> ChargingPlanResponse:
             charge_to_percent=params["charge_to_percent"],
             estimated_charging_minutes=params["estimated_charging_minutes"],
             station_provider_hint=prov if prov else None,
+            is_overnight=params.get("is_overnight", False),
         ))
 
     return ChargingPlanResponse(
@@ -345,4 +543,5 @@ async def plan_charging(req: ChargingRequest) -> ChargingPlanResponse:
         fuel_or_charge_stops=stops,
         feasible=True,
         warnings=warnings,
+        route_correction=route_correction,
     )

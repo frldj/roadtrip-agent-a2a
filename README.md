@@ -23,7 +23,12 @@ in the terminal, and a **web UI** with an interactive map.
 ## Features
 
 - **Routing**: Nominatim/OSM geocoding, OSRM route calculation, day-by-day split; full road geometry stored per segment for accurate rendering
+- **LLM-driven stopover planning**: `route_agent` uses Ollama to suggest meaningful intermediate cities for multi-day trips — instead of cutting at an arbitrary kilometre mark, the agent reasons about natural stopovers (e.g. Bordeaux between Paris and San Sebastián)
 - **EV charging**: battery discharge simulation, real charging stops via Overpass/OSM or Open Charge Map (optional key), Tesla Supercharger filter
+- **Overnight charging**: `vehicle_agent` automatically plans a recharge stop at each intermediate overnight waypoint (hotel, Tesla Camp Mode, campervan) — charges to 90 % by default so the next day starts with full range
+- **Direction-aware stop search**: candidate charging stations are scored by direction and distance; stations requiring more than 40 km of backtracking are deprioritised — prevents suggesting a station in the wrong direction (e.g. Rennes when heading south)
+- **A2A peer-to-peer**: when no charging station is found on a segment, `vehicle_agent` calls `route_agent` directly (without going through the orchestrator) to request an alternative route through the geographic midpoint
+- **Plan validation**: `validator_agent` (port 9004) checks plan coherence after assembly — driving time per day, charging feasibility, accommodation coverage — and returns typed issues with `error` / `warning` / `info` severity
 - **Elevation**: consumption correction using a physics-based EV model (mass, motor efficiency, regenerative braking), SRTM 90 m data via OpenTopoData (free, no key)
 - **Accommodation**: hotels and campsites via Google Places (optional key) or Overpass/OSM, with price range estimates
 - **Streaming**: real-time progress via A2A `TaskStatusUpdateEvent` during long computations
@@ -52,9 +57,10 @@ graph TB
     end
 
     subgraph Agents["Specialised A2A Agents"]
-        ROUTE["🗺 Route Agent\nlocalhost:9011\nNominatim + OSRM"]
-        VEHICLE["⚡ Vehicle Agent\nlocalhost:9012\nOverpass + OCM\n+ OpenTopoData"]
-        ACCOM["🏨 Accommodation Agent\nlocalhost:9013\nGoogle Places / Overpass"]
+        ROUTE["🗺 Route Agent\nlocalhost:9001\nNominatim + OSRM\n+ Ollama (stopovers)"]
+        VEHICLE["⚡ Vehicle Agent\nlocalhost:9002\nOverpass + OCM\n+ OpenTopoData"]
+        ACCOM["🏨 Accommodation Agent\nlocalhost:9003\nGoogle Places / Overpass"]
+        VALID["✅ Validator Agent\nlocalhost:9004\nplan coherence check"]
     end
 
     subgraph APIs["External APIs (free)"]
@@ -77,8 +83,11 @@ graph TB
     ORCH --> ROUTE
     ORCH --> VEHICLE
     ORCH --> ACCOM
+    ORCH -->|direct A2A call| VALID
     ORCH -.->|exposed as agent| SERVER
+    VEHICLE -->|peer-to-peer A2A\nno station found| ROUTE
     ROUTE --> OSM
+    ROUTE --> OLLAMA
     VEHICLE --> OSM
     VEHICLE --> TOPO
     VEHICLE --> OCM
@@ -96,9 +105,10 @@ sequenceDiagram
     participant W as Web / Chat CLI
     participant LLM as Ollama (local LLM)
     participant O as Orchestrator
-    participant R as Route Agent :9011
-    participant V as Vehicle Agent :9012
-    participant A as Accommodation Agent :9013
+    participant R as Route Agent :9001
+    participant V as Vehicle Agent :9002
+    participant A as Accommodation Agent :9003
+    participant VAL as Validator Agent :9004
 
     U->>W: "Paris → Barcelona, Tesla, camping"
     W->>LLM: conversation (streaming tokens)
@@ -111,13 +121,20 @@ sequenceDiagram
     W->>O: plan_roadtrip(RoadtripRequest)
     O-->>W: ⏳ progress (streaming)
     O->>R: RoutePlanRequest → A2A DataPart
-    R-->>O: RoutePlanResponse (segments + lat/lon)
+    Note over R: LLM suggests stopovers for multi-day trips
+    R-->>O: RoutePlanResponse (segments + lat/lon + llm_stopovers)
     O->>V: ChargingRequest → A2A DataPart
-    Note over V: SRTM elevation + Overpass/OCM stops
-    V-->>O: ChargingPlanResponse (stops + warnings)
+    Note over V: SRTM elevation + Overpass/OCM stops<br/>direction filter + overnight recharge
+    opt no station found on segment
+        V->>R: peer-to-peer A2A — alternative route via midpoint
+        R-->>V: sub-segments (route_correction)
+    end
+    V-->>O: ChargingPlanResponse (stops + overnight stops + warnings)
     O->>A: AccommodationRequest → A2A DataPart
     A-->>O: AccommodationPlanResponse (options + prices)
-    O-->>W: complete RoadtripPlan (JSON)
+    O->>VAL: PlanValidationRequest (direct A2A call, outside LLM loop)
+    VAL-->>O: PlanValidationResponse (issues: error/warning/info)
+    O-->>W: complete RoadtripPlan (JSON + validation)
     W-->>U: interactive map + clickable cards
     W->>LLM: "plan displayed, suggest adjustments"
     LLM-->>W: follow-up question (streaming)
@@ -161,15 +178,22 @@ cp .env.example .env
 ## Configuration (`.env`)
 
 ```dotenv
-# Agent listening ports
-ROUTE_AGENT_PORT=9011
-VEHICLE_AGENT_PORT=9012
-ACCOMMODATION_AGENT_PORT=9013
+# Agent listening ports (defaults shown)
+ROUTE_AGENT_PORT=9001
+VEHICLE_AGENT_PORT=9002
+ACCOMMODATION_AGENT_PORT=9003
+VALIDATOR_AGENT_PORT=9004
 
 # Agent URLs as seen by the orchestrator
-ROUTE_AGENT_URL=http://localhost:9011
-VEHICLE_AGENT_URL=http://localhost:9012
-ACCOMMODATION_AGENT_URL=http://localhost:9013
+ROUTE_AGENT_URL=http://localhost:9001
+VEHICLE_AGENT_URL=http://localhost:9002
+ACCOMMODATION_AGENT_URL=http://localhost:9003
+VALIDATOR_AGENT_URL=http://localhost:9004
+
+# LLM model used by the orchestrator and route_agent (must be available in Ollama)
+OLLAMA_MODEL=qwen2.5
+# Override the model used specifically by route_agent for stopover suggestions
+# ROUTE_AGENT_LLM_MODEL=qwen2.5:1.5b   # lighter model for faster responses
 
 # Optional API keys
 OPEN_CHARGE_MAP_KEY=   # enriched stop details (operator, connectors, power)
@@ -180,19 +204,20 @@ GOOGLE_PLACES_KEY=     # accommodation with real ratings and price levels
 
 ### Web UI + monitoring (recommended)
 
-Start the 4 services in separate terminals (or with `&`):
+Start the services in separate terminals (or with `&`):
 
 ```bash
 # Terminal 1 — local LLM
 ollama serve
 
 # Terminal 2 — planning agents
-python -m route_agent &
-python -m vehicle_agent &
-python -m accommodation_agent &
+python -m route_agent &          # :9001  routing + LLM stopovers
+python -m vehicle_agent &        # :9002  charging stops + elevation
+python -m accommodation_agent &  # :9003  hotels + campsites
+python -m validator_agent &      # :9004  plan coherence check
 
 # Terminal 3 — web server (also exposes /metrics)
-python -m web_server
+python -m web_server             # :8765
 
 # Terminal 4 — monitoring stack (requires Docker)
 docker compose -f docker-compose.monitoring.yml up -d
@@ -253,6 +278,7 @@ python -m orchestrator \
 pkill -f "python -m route_agent"
 pkill -f "python -m vehicle_agent"
 pkill -f "python -m accommodation_agent"
+pkill -f "python -m validator_agent"
 ```
 
 ### A2A server (optional)
@@ -285,12 +311,13 @@ roadtrip-a2a/
 ├── common/
 │   ├── schemas.py          # Pydantic models shared between agents
 │   ├── elevation.py        # Elevation correction via OpenTopoData (SRTM 90m)
-│   ├── geocoding.py        # Nominatim geocoding with in-memory cache
+│   ├── geocoding.py        # Nominatim geocoding (cache + "lat,lon" bypass)
 │   ├── a2a_client_utils.py # Generic A2A HTTP client
 │   └── a2a_data_utils.py   # DataPart + TaskStatusUpdateEvent helpers
-├── route_agent/            # agent :9011 — OSRM routing
-├── vehicle_agent/          # agent :9012 — charging stops + elevation
-├── accommodation_agent/    # agent :9013 — accommodation
+├── route_agent/            # agent :9001 — OSRM routing + LLM stopover suggestions
+├── vehicle_agent/          # agent :9002 — charging stops + elevation + overnight recharge
+├── accommodation_agent/    # agent :9003 — accommodation
+├── validator_agent/        # agent :9004 — plan coherence validation (new)
 ├── orchestrator/
 │   ├── core.py             # direct orchestration (no server)
 │   ├── __main__.py         # Python CLI
@@ -307,7 +334,7 @@ roadtrip-a2a/
 │   └── grafana/
 │       ├── provisioning/   # auto-provisioned datasource + dashboard
 │       └── dashboards/roadtrip_a2a.json  # pre-wired dashboard
-├── tests/                  # 93 tests (pytest, respx, asyncio)
+├── tests/                  # 127 tests (pytest, respx, asyncio)
 ├── docker-compose.monitoring.yml  # Prometheus :9090 + Grafana :3000
 └── docs/
     └── screenshot.png      # web UI screenshot
@@ -405,10 +432,20 @@ graph LR
 
 | Request | Response | Agent |
 |---|---|---|
-| `RoutePlanRequest` | `RoutePlanResponse` (+ `RouteSegment` with lat/lon) | Route Agent |
-| `ChargingRequest` | `ChargingPlanResponse` (+ elevation warnings) | Vehicle Agent |
+| `RoutePlanRequest` | `RoutePlanResponse` (+ `RouteSegment` with lat/lon, `llm_stopovers`, `warnings`) | Route Agent |
+| `ChargingRequest` | `ChargingPlanResponse` (+ elevation warnings, `route_correction`) | Vehicle Agent |
 | `AccommodationRequest` | `AccommodationPlanResponse` | Accommodation Agent |
-| `RoadtripRequest` | `RoadtripPlan` | Orchestrator |
+| `PlanValidationRequest` | `PlanValidationResponse` (list of `ValidationIssue`) | Validator Agent |
+| `RoadtripRequest` | `RoadtripPlan` (+ `validation`) | Orchestrator |
+
+**Notable fields:**
+
+- `RoutePlanResponse.llm_stopovers` — cities suggested by the route_agent LLM (e.g. `["Bordeaux"]` for Paris→San Sebastián)
+- `ChargingRequest.overnight_charging` (default `true`) — whether to plan a recharge stop at each intermediate overnight waypoint
+- `ChargingRequest.overnight_charge_to_percent` (default `90.0`) — target charge level for overnight stops
+- `ChargingStop.is_overnight` — distinguishes overnight recharge stops from en-route stops
+- `ChargingPlanResponse.route_correction` — alternative sub-segments proposed by `route_agent` via peer-to-peer A2A when no station is found
+- `ValidationIssue.severity` — `"error"` (plan infeasible), `"warning"` (non-blocking concern), `"info"` (informational)
 
 `RouteSegment` embeds geocoded coordinates (`start_lat/lon`, `end_lat/lon`) and the
 full road geometry as a JSON-encoded `[[lat, lon], …]` list in `path_hint` (populated
@@ -422,15 +459,25 @@ pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
-93 tests across 8 modules: schema validation, EV physics model, Haversine distance,
-Nominatim geocoding (HTTP-mocked), LLM plan extraction (including fallback), A2A
-message helpers, Prometheus metrics, and orchestrator deduplication guard.
+127 tests across 9 modules:
+
+| Module | Tests | Coverage |
+|---|---|---|
+| `test_schemas.py` | 14 | Pydantic model validation |
+| `test_route_core.py` | 16 | Haversine distance, `_parse_city_list` (LLM JSON robustness) |
+| `test_geocoding.py` | 12 | Nominatim HTTP-mocked, `"lat,lon"` bypass |
+| `test_elevation.py` | 15 | EV physics model (consumption factor) |
+| `test_validator_agent.py` | 28 | Plan validation: driving time, charging, accommodation |
+| `test_vehicle_agent.py` | 31 | Direction filter (`_is_forward`), best-station selection, overnight charging |
+| `test_metrics.py` | 11 | Prometheus metric definitions |
+| `test_a2a_data_utils.py` | — | A2A message helpers (requires `a2a` SDK) |
+| `test_llm_core_dedup.py` | — | Orchestrator deduplication guard (requires `a2a` SDK) |
 
 ## Roadmap
 
 Planned features (not yet implemented):
 
-- **AI route optimisation model**: replace fixed day-splitting with a model that optimises the trip under constraints (charging time, driver fatigue, weather, electricity prices)
+- **LLM per agent** (vehicle, accommodation): give each agent its own reasoning capability so they can make autonomous decisions rather than executing deterministic logic
 - **GPX export**: download the complete itinerary for GPS/phone
 - **Multi-vehicle comparison**: compare several vehicles side by side (range, cost)
 - **Weather integration**: incorporate weather forecasts along the route to adjust EV consumption (cold, wind)
