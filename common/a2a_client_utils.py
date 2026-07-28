@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 from a2a.client import A2ACardResolver, A2AClient
 from a2a.types import (
+    AgentCard,
     DataPart,
     Message,
     MessageSendParams,
@@ -24,14 +25,21 @@ from a2a.types import (
 from a2a.utils import get_data_parts, get_message_text
 
 
-async def call_agent(base_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+async def call_agent(
+    base_url: str,
+    payload: dict[str, Any],
+    agent_card: AgentCard | None = None,
+) -> dict[str, Any]:
     """
-    Résout l'Agent Card de `base_url`, envoie `payload` en DataPart,
-    et retourne la réponse en dict (DataPart natif ou TextPart JSON en fallback).
+    Send `payload` as a DataPart to an A2A agent and return the response dict.
+
+    If `agent_card` is provided (e.g. from a prior discovery call), the
+    /.well-known/agent.json fetch is skipped — saving one round-trip per call.
     """
     async with httpx.AsyncClient(timeout=120) as httpx_client:
-        resolver = A2ACardResolver(httpx_client, base_url=base_url)
-        agent_card = await resolver.get_agent_card()
+        if agent_card is None:
+            resolver = A2ACardResolver(httpx_client, base_url=base_url)
+            agent_card = await resolver.get_agent_card()
 
         client = A2AClient(httpx_client, agent_card=agent_card)
 

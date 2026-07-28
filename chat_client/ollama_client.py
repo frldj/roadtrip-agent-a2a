@@ -23,6 +23,21 @@ except Exception:
     _METRICS = False
 
 
+async def ollama_chat(
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Single non-streaming call to Ollama, with optional tool definitions."""
+    payload: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
+    if tools:
+        payload["tools"] = tools
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(f"{BASE_URL}/api/chat", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def list_models() -> list[str]:
     """Retourne les noms des modèles installés, triés par taille croissante."""
     try:
